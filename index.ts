@@ -10,8 +10,6 @@
 import runServer from './server';
 import { Coord, GameState, Battlesnake, Board, InfoResponse, MoveResponse } from './types';
 
-// info is called when you create your Battlesnake on play.battlesnake.com
-// and controls your Battlesnake's appearance
 function info(): InfoResponse {
   console.log("INFO");
   return {
@@ -23,26 +21,20 @@ function info(): InfoResponse {
   };
 }
 
-// start is called when your Battlesnake begins a game
 function start(gameState: GameState): void {
   console.log("GAME START");
 }
 
-// end is called when your Battlesnake finishes a game
 function end(gameState: GameState): void {
   console.log("GAME OVER\n");
 }
 
 // ─────────────────────────────────────────────
-// Utility helpers
+// Basic utilities
 // ─────────────────────────────────────────────
 
 function coordKey(c: Coord): string {
   return `${c.x},${c.y}`;
-}
-
-function coordEq(a: Coord, b: Coord): boolean {
-  return a.x === b.x && a.y === b.y;
 }
 
 function applyDir(head: Coord, dir: string): Coord {
@@ -55,348 +47,252 @@ function applyDir(head: Coord, dir: string): Coord {
   return head;
 }
 
-function inBounds(c: Coord, width: number, height: number): boolean {
-  return c.x >= 0 && c.x < width && c.y >= 0 && c.y < height;
+function inBounds(c: Coord, w: number, h: number): boolean {
+  return c.x >= 0 && c.x < w && c.y >= 0 && c.y < h;
 }
 
-// ─────────────────────────────────────────────
-// Result of synchronized BFS (flood fill)
-// ─────────────────────────────────────────────
-interface FloodResult {
-  myArea: number;          // checkered-discounted area for me
-  enemyMaxArea: number;    // max checkered-discounted area among all enemies
-  myFoodDist: number;      // nearest food dist inside my territory (W if none)
-  myFoodCount: number;     // food count in my territory
-  enemyMaxFoodCount: number; // max food count in any enemy territory
-  myTailCount: number;     // tails in my territory
-  enemyTailCount: number;  // tails in enemy territory (net: my_area - enemy_area)
-}
-
-/**
- * Synchronized BFS from me + all enemies.
- * Obstacles for BFS: my body (excl. last segment) ONLY.
- * Enemy bodies are NOT obstacles during BFS (they will move).
- */
-function floodFill(
-  myHead: Coord,
-  me: Battlesnake,
-  enemies: Battlesnake[],
-  board: Board
-): FloodResult {
-  const W = board.width;
-  const H = board.height;
-
-  // Build obstacle set: my body excluding last segment (tail)
-  const myObstacles = new Set<string>();
-  for (let i = 0; i < me.body.length - 1; i++) {
-    myObstacles.add(coordKey(me.body[i]));
-  }
-
-  // Build food set
-  const foodSet = new Set<string>();
-  for (const f of board.food) foodSet.add(coordKey(f));
-
-  // Build all tail positions
-  const allTails = new Set<string>();
-  allTails.add(coordKey(me.body[me.body.length - 1]));
-  for (const e of enemies) {
-    if (e.body.length > 0) {
-      allTails.add(coordKey(e.body[e.body.length - 1]));
-    }
-  }
-
-  // ownership: 0=unvisited, 1=mine, 2=enemy_i+2 (index), -1=contested
-  const ownership = new Int8Array(W * H); // 0=unvisited
-  const dist = new Int32Array(W * H).fill(-1);
-
-  // BFS queue: [x, y, owner_id]  owner_id: 0=me, 1..N=enemies
-  // We use a simple array-based queue
-  const queue: number[] = [];
-
-  function idx(c: Coord) { return c.y * W + c.x; }
-
-  // Enqueue my head
-  const myIdx = idx(myHead);
-  if (!myObstacles.has(coordKey(myHead))) {
-    ownership[myIdx] = 1;
-    dist[myIdx] = 0;
-    queue.push(myHead.x, myHead.y, 0); // owner 0 = me
-  }
-
-  // Enqueue enemy heads
-  for (let ei = 0; ei < enemies.length; ei++) {
-    const eHead = enemies[ei].head;
-    const eIdx = idx(eHead);
-    if (!inBounds(eHead, W, H)) continue;
-    if (dist[eIdx] === -1 && ownership[eIdx] !== -1) {
-      ownership[eIdx] = 2 + ei;
-      dist[eIdx] = 0;
-      queue.push(eHead.x, eHead.y, 1 + ei); // owner 1+ei = enemy[ei]
-    } else if (dist[eIdx] === 0) {
-      // contested at start (two snakes share same head? unlikely but handle)
-      ownership[eIdx] = -1;
-    }
-  }
-
-  const DIRS = [{ dx: 0, dy: 1 }, { dx: 0, dy: -1 }, { dx: -1, dy: 0 }, { dx: 1, dy: 0 }];
-
-  let qi = 0;
-  while (qi < queue.length) {
-    const cx = queue[qi++];
-    const cy = queue[qi++];
-    const owner = queue[qi++];
-    const curCoord: Coord = { x: cx, y: cy };
-    const curIdx = idx(curCoord);
-
-    for (const d of DIRS) {
-      const nx = cx + d.dx;
-      const ny = cy + d.dy;
-      const nc: Coord = { x: nx, y: ny };
-      if (!inBounds(nc, W, H)) continue;
-      // Obstacle: my body segments (excl. tail)
-      if (myObstacles.has(coordKey(nc))) continue;
-      const ni = idx(nc);
-      const nd = dist[curIdx] + 1;
-
-      if (dist[ni] === -1) {
-        // Unvisited
-        dist[ni] = nd;
-        ownership[ni] = owner === 0 ? 1 : (2 + (owner - 1));
-        queue.push(nx, ny, owner);
-      } else if (dist[ni] === nd && ownership[ni] !== -1) {
-        // Arrived at same dist from a different owner → contested
-        const prevOwner = ownership[ni];
-        const curOwnerTag = owner === 0 ? 1 : (2 + (owner - 1));
-        if (prevOwner !== curOwnerTag) {
-          ownership[ni] = -1;
-        }
-      }
-    }
-  }
-
-  // Compute checkered-discounted area for me and each enemy
-  function checkeredDiscount(evenCount: number, oddCount: number): number {
-    const diff = Math.abs(evenCount - oddCount);
-    return evenCount + oddCount - diff + Math.min(1, diff);
-  }
-
-  let myEven = 0, myOdd = 0;
-  let myFoodDistVal = W;
-  let myFoodCount = 0;
-  let myTailCount = 0;
-
-  // Per-enemy tracking
-  const enemyEven: number[] = new Array(enemies.length).fill(0);
-  const enemyOdd: number[]  = new Array(enemies.length).fill(0);
-  const enemyFoodCount: number[] = new Array(enemies.length).fill(0);
-  let enemyTailCount = 0;
-
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      const c: Coord = { x, y };
-      const i = idx(c);
-      const ow = ownership[i];
-      if (ow === -1 || dist[i] === -1) continue; // contested or unvisited
-      const parity = (x + y) % 2 === 0 ? 'even' : 'odd';
-      const key = coordKey(c);
-      const isFood = foodSet.has(key);
-      const isTail = allTails.has(key);
-
-      if (ow === 1) {
-        // Mine
-        if (parity === 'even') myEven++; else myOdd++;
-        if (isFood) {
-          myFoodCount++;
-          if (dist[i] < myFoodDistVal) myFoodDistVal = dist[i];
-        }
-        if (isTail) myTailCount++;
-      } else if (ow >= 2) {
-        // Enemy index = ow - 2
-        const ei = ow - 2;
-        if (parity === 'even') enemyEven[ei]++; else enemyOdd[ei]++;
-        if (isFood) enemyFoodCount[ei]++;
-        if (isTail) enemyTailCount++;
-      }
-    }
-  }
-
-  const myAreaVal = checkeredDiscount(myEven, myOdd);
-
-  let enemyMaxArea = 0;
-  let enemyMaxFoodCount = 0;
-  for (let ei = 0; ei < enemies.length; ei++) {
-    const ea = checkeredDiscount(enemyEven[ei], enemyOdd[ei]);
-    if (ea > enemyMaxArea) enemyMaxArea = ea;
-    if (enemyFoodCount[ei] > enemyMaxFoodCount) enemyMaxFoodCount = enemyFoodCount[ei];
-  }
-
-  return {
-    myArea: myAreaVal,
-    enemyMaxArea,
-    myFoodDist: myFoodDistVal,
-    myFoodCount,
-    enemyMaxFoodCount,
-    myTailCount,
-    enemyTailCount,
-  };
-}
-
-// ─────────────────────────────────────────────
-// Simulate one step: returns a new virtual game state
-// ─────────────────────────────────────────────
-interface SimState {
-  myHead: Coord;
-  myBody: Coord[];
-  myHealth: number;
-  myLength: number;
-  foodSet: Set<string>;
-}
-
-function simulateStep(
-  dir: string,
-  me: Battlesnake,
-  board: Board
-): SimState {
-  const newHead = applyDir(me.head, dir);
-  const foodSet = new Set<string>();
-  for (const f of board.food) foodSet.add(coordKey(f));
-
-  const headKey = coordKey(newHead);
-  const ateFood = foodSet.has(headKey);
-
-  let newBody: Coord[];
-  let newHealth: number;
-
-  if (ateFood) {
-    // Grow: don't remove tail
-    newBody = [newHead, ...me.body];
-    newHealth = 100;
-    foodSet.delete(headKey);
-  } else {
-    // Move: remove tail
-    newBody = [newHead, ...me.body.slice(0, me.body.length - 1)];
-    newHealth = me.health - 1;
-  }
-
-  return {
-    myHead: newHead,
-    myBody: newBody,
-    myHealth: newHealth,
-    myLength: newBody.length,
-    foodSet,
-  };
-}
-
-// ─────────────────────────────────────────────
-// Score calculation for one direction
-// ─────────────────────────────────────────────
-
-// Early / late weights for 7 features:
-// [being_longer, food_dist, controlled_tail_diff, area_size_diff,
-//  controlled_food_diff, me_health, lowest_enemy_health]
-const EARLY_WEIGHTS = [9, 7, 6, 1, 0, 1, -2];
-const LATE_WEIGHTS  = [0, 0, 20, 7, 3, 0, 0];
-const PROGRESS_MAX_TURN = 632;
-
-function computeWeights(turn: number): number[] {
-  const progress = Math.min(turn / PROGRESS_MAX_TURN, 1);
-  return EARLY_WEIGHTS.map((ew, i) => ew * (1 - progress) + LATE_WEIGHTS[i] * progress);
+function manhattan(a: Coord, b: Coord): number {
+  return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
 }
 
 function sign(x: number): number {
-  return x > 0 ? 1 : x < 0 ? -1 : 0;
+  if (x > 0) return 1;
+  if (x < 0) return -1;
+  return 0;
 }
 
-function beingLonger(myLen: number, enemies: Battlesnake[], W: number): number {
-  if (enemies.length === 0) return 0;
-  const maxEnemyLen = Math.max(...enemies.map(e => e.length));
-  const diff = myLen - maxEnemyLen;
-  const s = sign(diff);
-  const absVal = Math.abs(diff);
-  const inner = W * absVal + 1;
-  const logVal = Math.log(inner) / Math.log(1.5);
-  return s * Math.floor(logVal) * W;
-}
-
-function scoreDirection(
-  dir: string,
-  me: Battlesnake,
-  enemies: Battlesnake[],
-  board: Board,
-  turn: number
-): number {
-  const W = board.width;
-
-  // Simulate one step
-  const sim = simulateStep(dir, me, board);
-
-  // Build a virtual "me" for flood fill
-  const virtualMe: Battlesnake = {
-    ...me,
-    head: sim.myHead,
-    body: sim.myBody,
-    health: sim.myHealth,
-    length: sim.myLength,
-  };
-
-  // Build virtual board with updated food
-  const virtualBoard: Board = {
-    ...board,
-    food: Array.from(sim.foodSet).map(k => {
-      const [x, y] = k.split(',').map(Number);
-      return { x, y };
-    }),
-  };
-
-  // Run flood fill with simulated state
-  const flood = floodFill(sim.myHead, virtualMe, enemies, virtualBoard);
-
-  // Compute 7 feature values
-  const lowestEnemyHealth = enemies.length > 0
-    ? Math.min(...enemies.map(e => e.health))
-    : 0;
-
-  const features = [
-    beingLonger(sim.myLength, enemies, W),                          // being_longer
-    flood.myFoodDist,                                               // food_dist
-    flood.myTailCount - flood.enemyTailCount,                      // controlled_tail_diff
-    flood.myArea - flood.enemyMaxArea,                             // area_size_diff
-    flood.myFoodCount - flood.enemyMaxFoodCount,                   // controlled_food_diff
-    sim.myHealth,                                                   // me.health
-    lowestEnemyHealth,                                              // lowest_enemy_health
-  ];
-
-  const weights = computeWeights(turn);
-  let score = 0;
-  for (let i = 0; i < features.length; i++) {
-    score += features[i] * weights[i];
-  }
-
-  return score;
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, v));
 }
 
 // ─────────────────────────────────────────────
-// Determine if a cell is a lethal obstacle
-// for the "is this direction safe?" check.
-// Obstacles: all snake bodies except each snake's last tail segment.
+// Step 1: Build lethal obstacle set
+//   Lethal = all snake body segments EXCEPT each snake's last tail (moves away next turn)
 // ─────────────────────────────────────────────
-function buildObstacleSet(me: Battlesnake, board: Board): Set<string> {
+function buildLethalObstacles(board: Board): Set<string> {
   const obs = new Set<string>();
-
-  // My body except last segment
-  for (let i = 0; i < me.body.length - 1; i++) {
-    obs.add(coordKey(me.body[i]));
-  }
-
-  // All enemy bodies except their last segment
   for (const snake of board.snakes) {
-    if (snake.id === me.id) continue;
     for (let i = 0; i < snake.body.length - 1; i++) {
       obs.add(coordKey(snake.body[i]));
     }
   }
-
   return obs;
+}
+
+// ─────────────────────────────────────────────
+// Step 2: Single-step simulation
+//   Returns a simulated board state snapshot needed for scoring
+// ─────────────────────────────────────────────
+interface SimResult {
+  newHead: Coord;
+  ateFood: boolean;
+  newHealth: number;
+  newLength: number;
+  foodSet: Set<string>; // food remaining after eating
+}
+
+function simulate(me: Battlesnake, dir: string, board: Board): SimResult {
+  const newHead = applyDir(me.head, dir);
+  const foodKey = coordKey(newHead);
+  const foodKeys = new Set(board.food.map(coordKey));
+  const ateFood = foodKeys.has(foodKey);
+  const newHealth = ateFood ? 100 : me.health - 1;
+  const newLength = ateFood ? me.length + 1 : me.length;
+  const remainingFood = new Set(foodKeys);
+  if (ateFood) remainingFood.delete(foodKey);
+  return { newHead, ateFood, newHealth, newLength, foodSet: remainingFood };
+}
+
+// ─────────────────────────────────────────────
+// Step 3: Synchronous BFS territory calculation
+//   Returns { myArea, enemyArea } as Sets of coordKeys
+//   Also computes checkered-area discounted space
+// ─────────────────────────────────────────────
+
+interface TerritoryResult {
+  myArea: Set<string>;          // cells reachable by me first
+  enemyArea: Set<string>;       // cells reachable by any enemy first
+  myFoodDist: number;           // BFS steps to nearest food in myArea (W if none)
+  mySpace: number;              // checkered-discounted my area
+  enemyMaxSpace: number;        // max checkered-discounted enemy area
+}
+
+function checkeredDiscount(area: Set<string>): number {
+  let even = 0;
+  let odd = 0;
+  for (const key of area) {
+    const [xs, ys] = key.split(",");
+    const x = parseInt(xs, 10);
+    const y = parseInt(ys, 10);
+    if ((x + y) % 2 === 0) even++; else odd++;
+  }
+  const diff = Math.abs(even - odd);
+  return even + odd - diff + Math.min(1, diff);
+}
+
+function bfsTerritory(
+  myNewHead: Coord,
+  enemies: Battlesnake[],
+  lethalObs: Set<string>,
+  board: Board,
+  foodSet: Set<string>
+): TerritoryResult {
+  const W = board.width;
+  const H = board.height;
+  const DX = [0, 0, -1, 1];
+  const DY = [1, -1, 0, 0];
+
+  // owner: 0 = unclaimed, 1 = mine, 2 = enemy, 3 = tied
+  const owner = new Map<string, number>();
+
+  // Queue entries: { coord, owner(1=me, 2=enemy), dist }
+  interface QEntry { x: number; y: number; ownerIdx: number; dist: number; }
+  const queue: QEntry[] = [];
+
+  const enqueue = (x: number, y: number, ownerIdx: number, dist: number) => {
+    const k = `${x},${y}`;
+    if (lethalObs.has(k)) return;
+    if (x < 0 || x >= W || y < 0 || y >= H) return;
+    if (owner.has(k)) return;
+    owner.set(k, ownerIdx);
+    queue.push({ x, y, ownerIdx, dist });
+  };
+
+  enqueue(myNewHead.x, myNewHead.y, 1, 0);
+  for (const e of enemies) {
+    enqueue(e.head.x, e.head.y, 2, 0);
+  }
+
+  // BFS level by level
+  let qi = 0;
+  while (qi < queue.length) {
+    const cur = queue[qi++];
+    for (let d = 0; d < 4; d++) {
+      const nx = cur.x + DX[d];
+      const ny = cur.y + DY[d];
+      const nk = `${nx},${ny}`;
+      if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+      if (lethalObs.has(nk)) continue;
+      if (owner.has(nk)) {
+        // Check tie: if different owner arrives at same step → mark tied
+        const existEntry = queue.find(e => e.x === nx && e.y === ny);
+        if (existEntry && existEntry.dist === cur.dist + 1 && existEntry.ownerIdx !== cur.ownerIdx) {
+          owner.set(nk, 3);
+        }
+        continue;
+      }
+      enqueue(nx, ny, cur.ownerIdx, cur.dist + 1);
+    }
+  }
+
+  const myArea = new Set<string>();
+  const enemyArea = new Set<string>();
+  for (const [k, o] of owner) {
+    if (o === 1) myArea.add(k);
+    else if (o === 2) enemyArea.add(k);
+  }
+
+  // BFS food distance in myArea
+  let myFoodDist = W;
+  if (foodSet.size > 0) {
+    const foodBFS: Array<{ x: number; y: number; dist: number }> = [];
+    const fbVisited = new Set<string>();
+    const startKey = coordKey(myNewHead);
+    fbVisited.add(startKey);
+    foodBFS.push({ x: myNewHead.x, y: myNewHead.y, dist: 0 });
+    let fi = 0;
+    let found = false;
+    while (fi < foodBFS.length && !found) {
+      const cur = foodBFS[fi++];
+      const ck = `${cur.x},${cur.y}`;
+      if (foodSet.has(ck) && myArea.has(ck)) {
+        myFoodDist = cur.dist;
+        found = true;
+        break;
+      }
+      for (let d = 0; d < 4; d++) {
+        const nx = cur.x + DX[d];
+        const ny = cur.y + DY[d];
+        const nk = `${nx},${ny}`;
+        if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+        if (lethalObs.has(nk)) continue;
+        if (!myArea.has(nk)) continue;
+        if (fbVisited.has(nk)) continue;
+        fbVisited.add(nk);
+        foodBFS.push({ x: nx, y: ny, dist: cur.dist + 1 });
+      }
+    }
+  }
+
+  const mySpace = checkeredDiscount(myArea);
+  const enemyMaxSpace = checkeredDiscount(enemyArea); // single combined enemy area
+
+  return { myArea, enemyArea, myFoodDist, mySpace, enemyMaxSpace };
+}
+
+// ─────────────────────────────────────────────
+// Flood fill (reachable cell count from a position)
+// ─────────────────────────────────────────────
+function floodFillCount(start: Coord, lethalObs: Set<string>, board: Board): number {
+  const W = board.width;
+  const H = board.height;
+  if (!inBounds(start, W, H)) return 0;
+  const visited = new Set<string>();
+  const queue: Coord[] = [start];
+  visited.add(coordKey(start));
+  const DX = [0, 0, -1, 1];
+  const DY = [1, -1, 0, 0];
+  let qi = 0;
+  while (qi < queue.length) {
+    const cur = queue[qi++];
+    for (let d = 0; d < 4; d++) {
+      const nx = cur.x + DX[d];
+      const ny = cur.y + DY[d];
+      if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+      const nk = `${nx},${ny}`;
+      if (visited.has(nk) || lethalObs.has(nk)) continue;
+      visited.add(nk);
+      queue.push({ x: nx, y: ny });
+    }
+  }
+  return visited.size;
+}
+
+// BFS distance from start to a set of targets (returns Infinity if unreachable)
+function bfsDistToSet(start: Coord, targets: Set<string>, lethalObs: Set<string>, board: Board): number {
+  const W = board.width;
+  const H = board.height;
+  if (targets.size === 0) return Infinity;
+  const visited = new Set<string>();
+  const queue: Array<{ x: number; y: number; dist: number }> = [{ x: start.x, y: start.y, dist: 0 }];
+  visited.add(coordKey(start));
+  const DX = [0, 0, -1, 1];
+  const DY = [1, -1, 0, 0];
+  let qi = 0;
+  while (qi < queue.length) {
+    const cur = queue[qi++];
+    const k = `${cur.x},${cur.y}`;
+    if (targets.has(k)) return cur.dist;
+    for (let d = 0; d < 4; d++) {
+      const nx = cur.x + DX[d];
+      const ny = cur.y + DY[d];
+      if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+      const nk = `${nx},${ny}`;
+      if (visited.has(nk) || lethalObs.has(nk)) continue;
+      visited.add(nk);
+      queue.push({ x: nx, y: ny, dist: cur.dist + 1 });
+    }
+  }
+  return Infinity;
+}
+
+// ─────────────────────────────────────────────
+// Center distance
+// ─────────────────────────────────────────────
+function centerDist(pos: Coord, board: Board): number {
+  const cx = (board.width - 1) / 2;
+  const cy = (board.height - 1) / 2;
+  return Math.abs(pos.x - cx) + Math.abs(pos.y - cy);
 }
 
 // ─────────────────────────────────────────────
@@ -410,40 +306,297 @@ function move(gameState: GameState): MoveResponse {
   const H = board.height;
 
   const enemies = board.snakes.filter(s => s.id !== me.id);
-
+  const aliveSnakeCount = board.snakes.length; // includes me
   const DIRS = ["up", "down", "left", "right"];
-  const FALLBACK_ORDER = ["up", "left", "down", "right"];
 
-  // Build obstacle set for lethality check
-  const obstacles = buildObstacleSet(me, board);
+  // ─── Step 1: Eliminate lethal directions ──────────────
+  const lethalObs = buildLethalObstacles(board);
 
-  // Determine safe directions
-  const safeDirs: string[] = [];
+  const nonLethal: string[] = [];
   for (const dir of DIRS) {
-    const next = applyDir(me.head, dir);
-    if (!inBounds(next, W, H)) continue;
-    if (obstacles.has(coordKey(next))) continue;
-    safeDirs.push(dir);
-  }
-
-  if (safeDirs.length === 0) {
-    // All directions are lethal — fall back to priority order
-    const fallback = FALLBACK_ORDER[0];
-    console.log(`MOVE ${turn}: No safe moves! Falling back to ${fallback}`);
-    return { move: fallback };
-  }
-
-  // Score each safe direction
-  let bestDir = safeDirs[0];
-  let bestScore = -Infinity;
-
-  for (const dir of safeDirs) {
-    const score = scoreDirection(dir, me, enemies, board, turn);
-    console.log(`MOVE ${turn}: dir=${dir} score=${score.toFixed(2)}`);
-    if (score > bestScore) {
-      bestScore = score;
-      bestDir = dir;
+    const np = applyDir(me.head, dir);
+    if (inBounds(np, W, H) && !lethalObs.has(coordKey(np))) {
+      nonLethal.push(dir);
     }
+  }
+
+  // All directions lethal → fallback to any in-bounds direction
+  if (nonLethal.length === 0) {
+    for (const dir of DIRS) {
+      const np = applyDir(me.head, dir);
+      if (inBounds(np, W, H)) {
+        console.log(`MOVE ${turn}: All lethal, forced ${dir}`);
+        return { move: dir };
+      }
+    }
+    console.log(`MOVE ${turn}: Truly stuck, going up`);
+    return { move: "up" };
+  }
+
+  // Only one non-lethal direction → take it immediately
+  if (nonLethal.length === 1) {
+    console.log(`MOVE ${turn}: Only one safe dir: ${nonLethal[0]}`);
+    return { move: nonLethal[0] };
+  }
+
+  // ─── Phase determination (Step 4) ────────────────────
+  // Based on alive snake count first, then turn number
+  const is1v1 = aliveSnakeCount <= 2;
+  const isEndgame = is1v1;
+  let phase: "early" | "mid" | "late";
+  if (is1v1) {
+    phase = "late";
+  } else if (turn < 150) {
+    phase = "early";
+  } else if (turn < 400) {
+    phase = "mid";
+  } else {
+    phase = "late";
+  }
+
+  // ─── Food BFS (for emergency food seeking) ───────────
+  const foodKeys = new Set(board.food.map(coordKey));
+
+  // Per-direction food BFS distance from current head (needed for health < 25 fallback)
+  function bfsFoodDistFrom(pos: Coord): number {
+    return bfsDistToSet(pos, foodKeys, lethalObs, board);
+  }
+
+  // Health < 25 emergency: find the non-lethal direction with smallest food BFS dist
+  if (me.health < 25 && nonLethal.length > 1) {
+    let bestFoodDir = nonLethal[0];
+    let bestFoodDist = Infinity;
+    for (const dir of nonLethal) {
+      const np = applyDir(me.head, dir);
+      const d = bfsFoodDistFrom(np);
+      if (d < bestFoodDist) {
+        bestFoodDist = d;
+        bestFoodDir = dir;
+      }
+    }
+    console.log(`MOVE ${turn}: Health emergency, seeking food dir=${bestFoodDir}`);
+    return { move: bestFoodDir };
+  }
+
+  // ─── Score each non-lethal direction ─────────────────
+  const scores: { dir: string; score: number; dangerous: boolean }[] = [];
+
+  for (const dir of nonLethal) {
+    // Step 2: simulate
+    const sim = simulate(me, dir, board);
+    const newHead = sim.newHead;
+
+    // Step 3: BFS territory
+    const territory = bfsTerritory(newHead, enemies, lethalObs, board, sim.foodSet);
+    const { myArea, enemyArea, myFoodDist, mySpace, enemyMaxSpace } = territory;
+
+    // Flood fill reachable from newHead (for enclosed space detection)
+    const reachable = floodFillCount(newHead, lethalObs, board);
+
+    // Dangerous: new pos adjacent to a longer-or-equal enemy head
+    let dangerous = false;
+    for (const e of enemies) {
+      if (e.length >= me.length && manhattan(newHead, e.head) === 1) {
+        dangerous = true;
+        break;
+      }
+    }
+
+    let score = 0;
+
+    // ── Step 5: Endgame (1v1, turn >= 50) ──────────────
+    if (isEndgame && turn >= 50 && enemies.length > 0) {
+      const enemy = enemies[0];
+
+      // My tail BFS distance
+      const myTailSet = new Set([coordKey(me.body[me.body.length - 1])]);
+      const myTailDist = bfsDistToSet(newHead, myTailSet, lethalObs, board);
+
+      // Enemy tail BFS distance
+      const eTailSet = new Set([coordKey(enemy.body[enemy.body.length - 1])]);
+      const eTailDist = bfsDistToSet(enemy.head, eTailSet, lethalObs, board);
+
+      // Enemy forced to lose: enemy_space < enemy_tail_dist && my health > enemy_space
+      if (enemyMaxSpace < eTailDist && sim.newHealth > enemyMaxSpace) {
+        score += 10000;
+      }
+
+      // I'm forced to lose: my_space < my_tail_dist && enemy health > my_space
+      if (mySpace < myTailDist && enemy.health > mySpace) {
+        score -= 10000;
+      }
+
+      // I'll starve before reaching nearest food
+      if (sim.newHealth < myFoodDist) {
+        score -= 10000;
+      }
+    }
+
+    // ── Step 6 & 7: Feature values + weighted sum ───────
+    const maxEnemyLen = enemies.length > 0 ? Math.max(...enemies.map(e => e.length)) : 0;
+    const minEnemyHealth = enemies.length > 0 ? Math.min(...enemies.map(e => e.health)) : 0;
+
+    // Feature 1: being_longer
+    let beingLonger = 0;
+    if (enemies.length > 0) {
+      const diff = me.length - maxEnemyLen;
+      const s = sign(diff);
+      beingLonger = s * Math.floor(Math.log(Math.abs(W * diff) + 1) / Math.log(1.5)) * W;
+    }
+
+    // Feature 2: food_dist (negative weight — larger dist = worse)
+    const foodDist = myFoodDist;
+
+    // Feature 3: controlled_tail_diff
+    let controlledTailDiff = 0;
+    for (const snake of board.snakes) {
+      const tailKey = coordKey(snake.body[snake.body.length - 1]);
+      if (myArea.has(tailKey)) controlledTailDiff += 1;
+      else if (enemyArea.has(tailKey)) controlledTailDiff -= 1;
+    }
+
+    // Feature 4: area_size_diff (checkered discounted)
+    const areaSizeDiff = mySpace - enemyMaxSpace;
+
+    // Feature 5: controlled_food_diff
+    let myFoodCount = 0;
+    let enemyFoodCount = 0;
+    for (const f of board.food) {
+      const fk = coordKey(f);
+      if (myArea.has(fk)) myFoodCount++;
+      else if (enemyArea.has(fk)) enemyFoodCount++;
+    }
+    const controlledFoodDiff = myFoodCount - enemyFoodCount;
+
+    // Feature 6: me_health
+    const meHealth = sim.newHealth;
+
+    // Feature 7: lowest_enemy_health
+    const lowestEnemyHealth = minEnemyHealth;
+
+    // Weights (early / late)
+    const earlyW = {
+      beingLonger: 9,
+      foodDist: -7,
+      controlledTailDiff: 6,
+      areaSizeDiff: 1,
+      controlledFoodDiff: 0,
+      meHealth: 1,
+      lowestEnemyHealth: -2,
+    };
+    const lateW = {
+      beingLonger: 0,
+      foodDist: 0,
+      controlledTailDiff: 20,
+      areaSizeDiff: 7,
+      controlledFoodDiff: 3,
+      meHealth: 0,
+      lowestEnemyHealth: 0,
+    };
+
+    const progress = clamp(turn / 632, 0, 1);
+    const w = {
+      beingLonger:        earlyW.beingLonger        * (1 - progress) + lateW.beingLonger        * progress,
+      foodDist:           earlyW.foodDist            * (1 - progress) + lateW.foodDist            * progress,
+      controlledTailDiff: earlyW.controlledTailDiff  * (1 - progress) + lateW.controlledTailDiff  * progress,
+      areaSizeDiff:       earlyW.areaSizeDiff        * (1 - progress) + lateW.areaSizeDiff        * progress,
+      controlledFoodDiff: earlyW.controlledFoodDiff  * (1 - progress) + lateW.controlledFoodDiff  * progress,
+      meHealth:           earlyW.meHealth            * (1 - progress) + lateW.meHealth            * progress,
+      lowestEnemyHealth:  earlyW.lowestEnemyHealth   * (1 - progress) + lateW.lowestEnemyHealth   * progress,
+    };
+
+    score +=
+      w.beingLonger        * beingLonger +
+      w.foodDist           * foodDist +
+      w.controlledTailDiff * controlledTailDiff +
+      w.areaSizeDiff       * areaSizeDiff +
+      w.controlledFoodDiff * controlledFoodDiff +
+      w.meHealth           * meHealth +
+      w.lowestEnemyHealth  * lowestEnemyHealth;
+
+    // ── Step 8: Universal bonuses/penalties ─────────────
+
+    // Dangerous direction: possible head-on with longer/equal enemy
+    if (dangerous) score -= 50;
+
+    // Enclosed small space
+    if (reachable < sim.newLength) score -= 100;
+    else if (reachable <= 3) score -= 30;
+
+    // Health < 25 emergency food bonus (extra on top of BFS tie-break above)
+    if (me.health < 25) {
+      // Handled by early return above; but add small nudge here too
+      if (myFoodDist < W) score += 80;
+    }
+
+    // Early phase bonuses (turn < 150, alive snakes > 2)
+    if (phase === "early" && aliveSnakeCount > 2) {
+      // Ate food and thereby surpassed longest enemy
+      if (sim.ateFood && maxEnemyLen > 0 && sim.newLength > maxEnemyLen) {
+        score += 25;
+      }
+      // Moving toward a longer enemy head → penalty
+      for (const e of enemies) {
+        if (e.length >= me.length) {
+          const prevDist = manhattan(me.head, e.head);
+          const newDist  = manhattan(newHead, e.head);
+          if (newDist < prevDist) score -= 15;
+        }
+      }
+    }
+
+    // Late/endgame phase bonuses
+    if (isEndgame) {
+      // Moving into a connected space larger than body length → bonus
+      if (reachable > sim.newLength) score += 50;
+
+      // Corner penalty
+      if ((newHead.x <= 1 || newHead.x >= W - 2) && (newHead.y <= 1 || newHead.y >= H - 2)) {
+        score -= 30;
+      }
+
+      // I'm longer → chase enemy head
+      for (const e of enemies) {
+        if (me.length > e.length) {
+          const prevDist = manhattan(me.head, e.head);
+          const newDist  = manhattan(newHead, e.head);
+          if (newDist < prevDist) score += 20;
+        }
+      }
+    }
+
+    scores.push({ dir, score, dangerous });
+
+    console.log(
+      `MOVE ${turn}: dir=${dir} score=${score.toFixed(1)} ` +
+      `space=${mySpace} enemySpace=${enemyMaxSpace} ` +
+      `foodDist=${myFoodDist} dangerous=${dangerous} phase=${phase}`
+    );
+  }
+
+  // ─── Step 9: Pick best direction ─────────────────────
+  scores.sort((a, b) => b.score - a.score);
+  const topScore = scores[0].score;
+
+  // Collect tied directions
+  const tied = scores.filter(s => Math.abs(s.score - topScore) < 0.001);
+
+  let bestDir: string;
+  if (tied.length === 1) {
+    bestDir = tied[0].dir;
+  } else {
+    // Tie-break 1: prefer non-dangerous
+    const safe = tied.filter(s => !s.dangerous);
+    const candidates = safe.length > 0 ? safe : tied;
+
+    // Tie-break 2: prefer closer to board center
+    candidates.sort((a, b) => {
+      const pa = applyDir(me.head, a.dir);
+      const pb = applyDir(me.head, b.dir);
+      return centerDist(pa, board) - centerDist(pb, board);
+    });
+
+    bestDir = candidates[0].dir;
   }
 
   console.log(`MOVE ${turn}: chosen=${bestDir}`);
